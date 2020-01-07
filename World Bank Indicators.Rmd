@@ -1,0 +1,454 @@
+---
+title: "World Bank Indicators"
+author: "Laura Noetzel"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::readthedown:
+    highlight: kate
+---
+
+
+```{r knitr_init, echo=FALSE, cache=FALSE}
+library(knitr)
+library(rmdformats)
+
+## Global options
+options(max.print="75")
+opts_chunk$set(echo=T,
+	             cache=TRUE,
+               prompt=FALSE,
+               tidy=TRUE,
+               comment=NA,
+               message=FALSE,
+               warning=FALSE)
+opts_knit$set(width=75)
+```
+
+# Preface
+
+This project is dedicated to finding patterns in the structure of countries that are similar to each other, regarding their GDP and indicators to that. To get these insights a cluster analysis will be performed using kmeans and agglomerative hierarchical clustering. Based on the best fitting clustering results a linear regression will be performed for each cluster to see the drivers of the GDP and if they differ between the clusters. For further analysis of that, a principal component analysis can be used, yet I chose to start off with a linear regression.
+
+# The Data
+
+The data analyzed here can be downloaded from the [World Bank](https://data.worldbank.org/), that is an open database, which offers access to global development data. The used excerpt includes the **G**ross **D**omestic **P**roduct and possible indicators to that for over 200 countries between the years 2000 and 2010. The columns are explained as follows:
+
+- **Country**: The name of the country that is looked at.
+- **Date**: The year that is looked at.
+- **Train_Mio_Passenger_KM**: Million passenger-kilometers, the number of passengers transportet by rail times the kilometers travelled.
+- **Cars_Per_1000_People**: Number of cars per 1000 inhabitants.
+- **Mobile_Phone_Subscribers**: Number of inhabitants subscribed to a public mobile telephone service.
+- **Internet_Users_Per_100_People**: Number of internet users per 100 inhabitants.
+- **Mortality_Under_5_Per_1000_Live_Births**: The number of children dying below the age of 5 per 1000 live births.
+- **Health_Expenditure_Per_Capita_In_USD**: Expenditures on health in US Dollar per capita, including consumed healthcare goods and services.
+- **Total_Health_Expenditure_In_Percent_Of_GDP**: Total expenditures on health in Percent of the GDP, including consumed healthcare goods and services.
+- **Total_Population**: Total number of inhabitants.
+- **Urban_Population**:Total number of inhabitants livin in urban areas.
+- **Birth_Rate_Per_1000_People**: Number of live births per 1000 inhabitants.
+- **Life_Expectancy_Women**: Life expectancy of women.
+- **Life_Expectancy_Men**: Life expectancy of men.
+- **Total_Life_Expectancy**: Combined life expectancy of women and men.
+- **Share_Of_People_Aged_0_To_14_In_Percent_Of_Total_Population**: Percentage of people aged between  0 and 14.
+- **Share_Of_People_Aged_15_To_64_In_Percent_Of_Total_Population**: Percentage of people aged between 15 and 64.
+- **Share_Of_People_Aged_65plus_In_Percent_Of_Total_Population**: Percentage of people aged 65 or older.
+- **Total_GDP_In_USD**: Total Gross Domestic Product in US Dollar.
+- **GDP_Per_Capita_In_USD**: Gross Domestic Product per capita in US Dollar.
+
+# Preprocessing
+
+At first, the necessary packages and the data must be loaded.
+
+```{r}
+library(readxl)
+library(tidyverse)
+library(factoextra)
+library(plotly)
+library(lubridate)
+library(maps)
+library(sf)
+library(lwgeom)
+library(gridExtra)
+library(ggsci)
+
+df <- read_excel("World Bank Indicators.xlsx")
+
+theme_set(theme_classic())
+```
+
+Before inspecting the data further, the columns receive shorter or more concise names and get cleaned off special characters.
+
+```{r}
+names(df) <- str_replace_all(names(df), c(" " = "_", 
+                                          "," = "", 
+                                          ":" = "", 
+                                          "[(]" = "", 
+                                          "[)]" = "", 
+                                          "-" = "_",
+                                          "[\\$]" = "Dollar",
+                                          "%" = "Percent",
+                                          "[\\+]" = "plus"))
+names(df) <- str_trim(names(df), "left")
+df <- df %>%
+  rename(Country = Country_Name)
+df <- df %>%
+  rename(Train_Mio_Passenger_KM = Transit_Railways_million_passenger_km,
+         Cars_Per_1000_People = Transit_Passenger_cars_per_1000_people)
+df <- df %>%
+  rename(Mobile_Phone_Subscribers = Business_Mobile_phone_subscribers,
+         Internet_Users_Per_100_People = Business_Internet_users_per_100_people)
+df <- df %>%
+  rename(Mortality_Under_5_Per_1000_Live_Births = Health_Mortality_under_5_per_1000_live_births,
+         Health_Expenditure_Per_Capita_In_USD = Health_Health_expenditure_per_capita_current_USDollar,
+         Total_Health_Expenditure_In_Percent_Of_GDP = Health_Health_expenditure_total_Percent_GDP)
+df <- df %>%
+  rename(Total_Population = Population_Total_count,
+         Urban_Population = Population_Urban_count,
+         Birth_Rate_Per_1000_People = Population_Birth_rate_crude_per_1000)
+df <- df %>%
+  rename(Life_Expectancy_Women = Health_Life_expectancy_at_birth_female_years,
+         Life_Expectancy_Men = Health_Life_expectancy_at_birth_male_years,
+         Total_Life_Expectancy = Health_Life_expectancy_at_birth_total_years)
+df <- df %>%
+  rename(Share_Of_People_Aged_0_To_14_In_Percent_Of_Total_Population = Population_Ages_0_14_Percent_of_total,
+         Share_Of_People_Aged_15_To_64_In_Percent_Of_Total_Population = Population_Ages_15_64_Percent_of_total,
+         Share_Of_People_Aged_65plus_In_Percent_Of_Total_Population = Population_Ages_65plus_Percent_of_total)
+df <- df %>%
+  rename(Total_GDP_In_USD = Finance_GDP_current_USDollar,
+         GDP_Per_Capita_In_USD = Finance_GDP_per_capita_current_USDollar)
+```
+
+After that a first inspection of the data follows.
+
+```{r}
+str(df)
+summary(df)
+complete <- na.omit(df)
+complete %>% filter(year(Date) == 2000)
+rm(complete)
+```
+
+It shows that there are a lot of missing values. There are different ways to handle this. At first I tried to omit all incomplete cases. Because of the huge loss of information, as there are only a few hundred complete cases starting in the year 2003, I chose a different option. To come to a solid conclusion I replaced all missing values once with 0 and once with the median of a variable per year and did clustering with both cases. I then chose to replace the NAs with 0, to have a low distortion. Many missing values occur in very small countries or in countries with little to no infrastructure. Choosing the median led to a higher distortion than using 0. Though it later affects the linear regression analysis I kept my choice, as the wrong classification of countries weighted higher in my eyes.
+
+```{r}
+sum(is.na(df))
+df[is.na(df)] <- 0
+sum(is.na(df))
+```
+
+# Cluster Analysis
+
+## Preparations
+
+To avoid a bias created by different units of measurement, the numeric variables are standardized, resp. centered and scaled. There are other possibilities, such as normalization (MinMax), but the used method in class has been standardization, so it is used here, too.
+
+```{r}
+df_scaled <- df
+df_scaled[,-c(1,2)] <- scale(df_scaled[-c(1,2)])
+```
+
+## Clustering Algorithms
+
+### K-Means
+
+The K-Means algorithm is used with 25 starts and 50 iterations, as more starts did not give better results and no convergence is achieved before 50 iterations. The Lloyd algorithm is used to have a random first assignment to clusters.
+
+### HClust
+
+The agglomerative hierarchical clustering algorithm hclust is used with the function hcut for more flexible hyperparameter tuning. There are other possibilities for clustering functions that hclust, for example agnes or diana from cluster package, but the normal function is used here. In the hcut function it can be specified that the data is not a dissimilarity matrix, which is then calculated automatically. Euclidean distance is used a a distance measure. Clustering happens also for all four linkage methods discussed in class (complete, single, average, centroid).
+
+## Number Of Clusters
+
+To determine the best fitting number of clusters I used both, the elbow and silhouette method for the k-means and hclust algorithm.
+
+```{r}
+p <- df_scaled %>%
+  select(-Country, -Date) %>%
+  fviz_nbclust(kmeans, method = "wss", nstart = 25, iter.max = 50)
+p1 <- df_scaled %>%
+  select(-Country,-Date) %>%
+  fviz_nbclust(kmeans, method = "silhouette", nstart = 25, iter.max = 50)
+p2 <- df_scaled %>%
+  select(-Country,-Date) %>%
+  fviz_nbclust(hcut, method = "wss")
+p3 <- df_scaled %>%
+  select(-Country,-Date) %>%
+  fviz_nbclust(hcut, method = "silhouette")
+grid.arrange(p, p1, p2, p3, nrow = 2, ncol = 2)
+```
+
+Both methods return the same recommendation for each algorithm. Though both methods recommend a different number for k. The silhouette methods recommends two clusters, whereas the elbow method suggests four to five clusters. I will perform the cluster analysis with 3, 4 and 5 k. 4 and 5 k, because the elbow method suggests that and 3 k, because we divide the world into first, second and third world countries all the time and thus clusters may have an easy to perceive meaning.
+
+## Clustering with K-Means
+
+Now I perform the actual clustering with the k-means algorithm and the different ks and compare the results visually.
+
+```{r}
+km_3 <- kmeans(df_scaled[-c(1,2)], centers = 3, nstart = 25, iter.max = 50, algorithm = "Lloyd")
+p4 <- fviz_cluster(km_3, data = df_scaled[-c(1,2)], geom = "point", show.clust.cent = F, ggtheme = theme_classic(), palette = "rickandmorty", repel = T)
+p5 <- p4 +
+  geom_point(aes(text = paste0(df_scaled$Country, ":", year(df$Date)), colour = as_factor(km_3$cluster)), size = 0.2)
+
+km_4 <- kmeans(df_scaled[-c(1,2)], centers = 4, nstart = 25, iter.max = 50, algorithm = "Lloyd")
+p6 <- fviz_cluster(km_4, data = df_scaled[-c(1,2)], geom = "point", show.clust.cent = F, ggtheme = theme_classic(), palette = "rickandmorty", repel = T)
+p7 <- p6 +
+  geom_point(aes(text = paste0(df_scaled$Country, ":", year(df$Date)), colour = as_factor(km_4$cluster)), size = 0.2)
+
+km_5 <- kmeans(df_scaled[-c(1,2)], centers = 5, nstart = 25, iter.max = 50, algorithm = "Lloyd")
+p8 <- fviz_cluster(km_5, data = df_scaled[-c(1,2)], geom = "point", show.clust.cent = F, ggtheme = theme_classic(), palette = "rickandmorty", repel = T)
+p9 <- p8 +
+  geom_point(aes(text = paste0(df_scaled$Country, ":", year(df$Date)), colour = as_factor(km_5$cluster)), size = 0.2)
+
+subplot(p5, p7, p9, nrows = 3, shareX = T, shareY = T)
+```
+
+Looking at the different solutions, the four cluster solution looks best to me until now. Three clusters seem to be too less and in the five cluster solution, there is a lot of overlapping in the three clusters in the middle.
+
+## Clustering with HClust
+
+Now I will perform agglomerative hierarchical clustering, to see if there are better fitting clusters than with k-means. I will compare the clusters visually again. Before doing that, I will compare the different dendograms for each number of clusters and linkage method, to see which linkage performs best.
+
+```{r}
+hc_complete <- hcut(df_scaled[-c(1,2)], isdiss = F, hc_func = "hclust", hc_metric = "euclidean", 
+                    hc_method = "complete")
+p10 <- fviz_dend(hc_complete, k_colors = "black", show_labels = F, main = "Complete Linkage")
+
+hc_single <- hcut(df_scaled[-c(1,2)], isdiss = F, hc_func = "hclust", hc_metric = "euclidean", hc_method = "single")
+p11 <- fviz_dend(hc_single, k_colors = "black", show_labels = F, main = "Single Linkage")
+
+hc_average <- hcut(df_scaled[-c(1,2)], isdiss = F, hc_func = "hclust", hc_metric = "euclidean", 
+                            hc_method = "average")
+p12 <- fviz_dend(hc_average, k_colors = "black", show_labels = F, main = "Average Linkage")
+
+hc_centroid <- hcut(df_scaled[-c(1,2)], isdiss = F, hc_func = "hclust", hc_metric = "euclidean", 
+                             hc_method = "centroid")
+p13 <- fviz_dend(hc_centroid, k_colors = "black", show_labels = F, main = "Centroid Linkage")
+
+grid.arrange(p10, p11, p12, p13, nrow = 2, ncol = 2)
+
+```
+
+Looking at the dendograms, the complete linkage gives the best fitting results as the clusters are even. Especially the centroid linkage has a messed up assignment to clusters. Looking at a different number of clusters, the centroid linkage will be used.
+
+In the next step, the different numbers of clusters will be calculated and visualized as before with k-means.
+
+```{r}
+hc_3 <- hcut(df_scaled[-c(1,2)], k = 3, isdiss = F, hc_func = "hclust", hc_metric = "euclidean", 
+                    hc_method = "complete")
+p14 <- fviz_cluster(hc_3, data = df_scaled[-c(1,2)], geom = "point", show.clust.cent = F, ggtheme = theme_classic(), palette = "rickandmorty", repel = T)
+p15 <- p14 + geom_point(aes(text = paste0(df_scaled$Country, ":", year(df$Date)), colour = as_factor(hc_3$cluster)), size = 0.2)
+
+hc_4 <- hcut(df_scaled[-c(1,2)], k = 4, isdiss = F, hc_func = "hclust", hc_metric = "euclidean", 
+                    hc_method = "complete")
+p16 <- fviz_cluster(hc_4, data = df_scaled[-c(1,2)], geom = "point", show.clust.cent = F, ggtheme = theme_classic(), palette = "rickandmorty", repel = T)
+p17 <- p16 + geom_point(aes(text = paste0(df_scaled$Country, ":", year(df$Date)), colour = as_factor(hc_4$cluster)), size = 0.2)
+
+hc_5 <- hcut(df_scaled[-c(1,2)], k = 5, isdiss = F, hc_func = "hclust", hc_metric = "euclidean", 
+                    hc_method = "complete")
+p18 <- fviz_cluster(hc_5, data = df_scaled[-c(1,2)], geom = "point", show.clust.cent = F, ggtheme = theme_classic(), palette = "rickandmorty", repel = T)
+p19 <- p18 + geom_point(aes(text = paste0(df_scaled$Country, ":", year(df$Date)), colour = as_factor(hc_5$cluster)), size = 0.2)
+
+subplot(p15, p17, p19, nrows = 3, shareX = T, shareY = T)
+```
+
+As we can see here, the cluster assignment is not that useful in my opinion. There is one giant cluster and two/three/four very small clusters with, you could say outliers, like China or India, that form their own cluster. Comparing these with the result from k-means clustering, the four clusters generated there seem to fit the data best.
+
+```{r}
+subplot(p7, p17, nrows = 2, shareX = T, shareY = T)
+```
+
+To me, the k-means solution with four clusters seems to be the most reasonable solution for a classification of the different countries in different years. So I chose to further work with that solution.
+
+```{r}
+df <- bind_cols(df, cluster = as_factor(km_4$cluster))
+```
+
+I then tried to come up with meaningful names for each cluster, but discarded the upcoming ideas, as I couldn't find names that are conclusive enough. Yet, I want to give some information for each cluster.
+
+- **Cluster 1**: The smallest cluster, containing only data from India, China and the USA. To me, that seemed quite reasonable, as all these countries have a high population and a great territory. The whole structure of India and China resembles each other, e.g. life expectancy, total population or health expenditure. The USA have a similar age structure and also a high total population. However, they could have been classified as cluster 4, too, as they are also near that.
+
+- **Cluster 2**: This cluster contains many countries that we would naturally classify as third world countries. Among them are many countries in Africa, South-East Asia and South and Middle America. They all have a lower GDP, compared to states in cluster 4, and resemble each other in terms of health expenditure, age structure or birth rate. Genuinely, I would classify them as poorer countries with less infrastructure.
+
+- **Cluster 3**: In this cluster many small countries and island states are grouped together. They all have their population in common and, unfortunately, many values that are zero. Among them are countries like South Sudan with little to no infrastructure, thus containing formerly missing values as 0. Nevertheless, to me it made sense to group these together, as they resemble each other, not only in the zero values, but in height of GDP and total population.
+
+- **Cluster 4**: Many of the countries in this cluster would genuinely be described as first world countries. Almost every european country has been grouped in this cluster, as well as Canada, Australia and New Zealand. They resemble each other in their infrastructure (e.g. train passengers and cars, mobile phone and internet users), age structure or child mortality. Most of them have a high urban population. I would describe them as richer, urban countries with a good infrastructure.
+
+There are two more things that can be observed, when looking at the cluster distribution on a map. First of all, some countries change their cluster over time. The reasons for that can be a better or worse infrastructure and so on, but can't be determined here in detail. The second thing that catches your eye is, that many countries that are geographically near each other share the same cluster.
+
+To look at the clusters on a world map, there first need to be some adjustments in the names of countries, to make it easier to join them to their geodata. Then the geodata is loaded, joined with the data and visualized in a map. Unfortunately there isn't geodata available in R for some very small countries, that thus aren't visualized here.
+
+```{r}
+df$Country <- gsub("Antigua and Barbuda", "Antigua", df$Country)
+df$Country <- gsub("Brunei Darussalam", "Brunei", df$Country)
+df$Country <- gsub("Congo, Dem. Rep.", "Democratic Republic of the Congo", df$Country)
+df$Country <- gsub("Congo, Rep.", "Republic of Congo", df$Country)
+df$Country <- gsub("Cote d'Ivoire", "Ivory Coast", df$Country)
+df$Country <- gsub("Egypt, Arab Rep.", "Egypt", df$Country)
+df$Country <- gsub("Gambia, The", "Gambia", df$Country)
+df$Country <- gsub("Hong Kong SAR, China", "China:Hong Kong", df$Country)
+df$Country <- gsub("Iran, Islamic Rep.", "Iran", df$Country)
+df$Country <- gsub("Korea, Dem. Rep.", "North Korea", df$Country)
+df$Country <- gsub("Korea, Rep.", "South Korea", df$Country)
+df$Country <- gsub("Kyrgyz Republic", "Kyrgyzstan", df$Country)
+df$Country <- gsub("Lao PDR", "Laos", df$Country)
+df$Country <- gsub("Macao SAR, China", "China:Macao", df$Country)
+df$Country <- gsub("Macedonia, FYR", "Macedonia", df$Country)
+df$Country <- gsub("Russian Federation", "Russia", df$Country)
+df$Country <- gsub("Sint Maarten [(]Dutch part[)]", "Sint Maarten", df$Country)
+df$Country <- gsub("Slovak Republic", "Slovakia", df$Country)
+df$Country <- gsub("St. Lucia", "Saint Lucia", df$Country)
+df$Country <- gsub("St. Martin [(]French part[)]", "Saint Martin", df$Country)
+df$Country <- gsub("St. Vincent and the Grenadines", "Saint Vincent", df$Country)
+df$Country <- gsub("Syrian Arab Republic", "Syria", df$Country)
+df$Country <- gsub("United Kingdom", "UK", df$Country)
+df$Country <- gsub("United States", "USA", df$Country)
+df$Country <- gsub("Venezuela, RB", "Venezuela", df$Country)
+df$Country <- gsub("Yemen, Rep.", "Yemen", df$Country)
+df$Country <- gsub("Bahamas, The", "Bahamas", df$Country)
+df$Country <- gsub("Faeroe Islands", "Faroe Islands", df$Country)
+df$Country <- gsub("Micronesia, Fed. Sts.", "Micronesia", df$Country)
+df$Country <- gsub("St. Kitts and Nevis", "Saint Kitts", df$Country)
+df$Country <- gsub("Trinidad and Tobago", "Trinidad", df$Country)
+df$Country <- gsub("Virgin Islands [(]U.S.[])]", "Virgin Islands, US", df$Country)
+df$Country <- gsub("West Bank and Gaza", "Palestine", df$Country)
+
+sf_map <- st_as_sf(map("world", plot = F, fill = T))
+sf_map <- st_make_valid(sf_map)
+
+df <- full_join(df, sf_map, by = c("Country" = "ID"))
+df <- st_as_sf(df)
+
+p20 <- df %>%
+  filter(year(Date) == 2000) %>%
+  ggplot(aes(fill = cluster)) +
+  geom_sf() +
+  scale_fill_rickandmorty() +
+  labs(title = "2000")
+p21 <- df %>%
+  filter(year(Date) == 2002) %>%
+  ggplot(aes(fill = cluster)) +
+  geom_sf() +
+  scale_fill_rickandmorty() +
+  labs(title = "2002")
+p22 <- df %>%
+  filter(year(Date) == 2004) %>%
+  ggplot(aes(fill = cluster)) +
+  geom_sf() +
+  scale_fill_rickandmorty() +
+  labs(title = "2004")
+p23 <- df %>%
+  filter(year(Date) == 2006) %>%
+  ggplot(aes(fill = cluster)) +
+  geom_sf() +
+  scale_fill_rickandmorty() +
+  labs(title = "2006")
+p24 <- df %>%
+  filter(year(Date) == 2008) %>%
+  ggplot(aes(fill = cluster)) +
+  geom_sf() +
+  scale_fill_rickandmorty() +
+  labs(title = "2008")
+p25 <- df %>%
+  filter(year(Date) == 2010) %>%
+  ggplot(aes(fill = cluster)) +
+  geom_sf() +
+  scale_fill_rickandmorty() +
+  labs(title = "2010")
+
+grid.arrange(p20, p21, p22, p23, p24, p25, nrow = 3, ncol = 2)
+```
+
+# Linear Regression Analysis
+
+Now that the countries have been clustered into similar groups, I want to know if the internal structure of the clusters, leading to the total GDP in US Dollar differs from each other. To get a first glimpse at the structure I assume that the relationship between the dependent variable GDP and the other independet variables is linear. The regression analysis will show if it's true or if other models or algorithms would fit the data better.
+
+The overall data frame df is split up into its clusters before performing regression analysis, so the code is easier to read.
+
+```{r}
+cluster_1 <- df %>% filter(cluster == 1)
+cluster_2 <- df %>% filter(cluster == 2)
+cluster_3 <- df %>% filter(cluster == 3)
+cluster_4 <- df %>% filter(cluster == 4)
+```
+
+The overall regression model is set in the next step. I assumed that the total GDP in US Dollar is linearly dependent on all other variables, except for the GDP per capita.
+
+```{r}
+model <- as.formula(Total_GDP_In_USD ~ Share_Of_People_Aged_65plus_In_Percent_Of_Total_Population +
+                      Share_Of_People_Aged_15_To_64_In_Percent_Of_Total_Population +
+                      Share_Of_People_Aged_0_To_14_In_Percent_Of_Total_Population +
+                      Total_Life_Expectancy + Life_Expectancy_Men + Life_Expectancy_Women +
+                      Birth_Rate_Per_1000_People + Urban_Population + Total_Population + 
+                      Total_Health_Expenditure_In_Percent_Of_GDP + 
+                      Health_Expenditure_Per_Capita_In_USD + 
+                      Mortality_Under_5_Per_1000_Live_Births + Internet_Users_Per_100_People + 
+                      Mobile_Phone_Subscribers + Cars_Per_1000_People + Train_Mio_Passenger_KM)
+```
+
+Now, the regression analysis is performed for each cluster.
+
+```{r}
+linreg_cluster1 <- lm(model , cluster_1)
+summary(linreg_cluster1)
+```
+
+We can see that not all variables have an influence on the GDP that is not random. In this cluster it is the share of people between 15 to 64 years in age, the urban and total population, the health expenditure in total in percent of GDP and per capita in US Dollar, as well as the number of internet users per 100 inhabitants. Our R-squared statistics is very high with over 99%, which means through this model, over 99% of variance is explained. If we would perfrom the regression again with the significant variables only, the R-squared would be a little smaller, as the random influence from all other variables, that may explain some variance, would be dropped, but it would stay at this high level.
+
+To see if the model really fits and no other problem may be underlying, I visually inspect the residuals of this model.
+
+```{r}
+par(mfcol=c(2,2))
+plot(linreg_cluster1)
+```
+
+At first glance most things seem to be fine. The residuals vs. fitted plot shows that there may be a slightly non-linear influence, but overall the red line should be vertical, which is the case. This plot, as well as the scale-location plot can show heteroskedasticity. A linear regression assumes homoskedasticity, so if the red line is not vertical it indicates heteroskedasticity. Here we have an almost vertical line, but it shows a slight curve. It could be tried to transform the dependent variable (log or squareroot), so that this plot only shows homoskedasticity, but for now I am fine with it. The normal Q-Q plot indicates that all residuals are normally distributed, as they all gather around the drawn line. The last plot, residuals vs. leverage, shows that there aren't any outliers with a strong influence on the regression line. If there would be strong outliers, they would be located outside of the cook's distance lines.
+
+```{r}
+linreg_cluster2 <- lm(model, cluster_2)
+summary(linreg_cluster2)
+```
+
+Now that we look at the summary of the regression analysis for the second cluster, we can see that here other variables have a statistically significant influence on the GDP. Same as for cluster 1, the urban and total population and the health expenditures in total and per capita have a non random influence. Different from there, the number of mobile phone subscribers and the number of cars per 1000 people seems to have a significant influence on the GDP. Unlike before, the adjusted R-squared measure for model accuracy is way lower. Only 78,92% of variance is explained. Generally it is said to accept models with a R-squared above 80%, so something doesn't seem to fit here. To inspect this further, we look again at the plots for inspecting the residuals.
+
+```{r}
+par(mfcol=c(2,2))
+plot(linreg_cluster2)
+```
+
+The residuals vs. fitted plot shows a nice vertical line, indicating that the relationship between our dependent variable GDP and the independent variables is a linear one, just as we assumed. The scale-location plot on the other hand implies that the variance is not constant, therefore heteroskedastic. To change that a logarithmic transformation of the dependent variable can be performed. The quantile-quantile plot shows something unwanted, too. The points at the beginning and end of the plot are too far away from the line to assume a normal distribution of the residuals, which is desired. In the residuals vs. leverage plot, a strong outlier outside the cook's distance lines can be detected. The regression analysis should be run again, with the significant independent variables only, a transformed dependent variable and without the outlier or with a smoothed outlier (e.g. via winsorization), to see whether that changes the r-squared to a higher one and achieves the desired attributes, such as homoskedasticity.
+
+```{r}
+linreg_cluster3 <- lm(model, cluster_3)
+summary(linreg_cluster3)
+```
+
+The first thing that catches the eye here are the many missing values. As mentioned in the beginning, this is due to my choice of replacing missing values with a 0. In this cluster many very small countries are represented that weren't able to collect the desired data, leading to variables that are completely missing. Nevertheless, there are some variables that have a significant influence on the GDP. As seen in the clusters before, these are the total and per capita health expenditures, the number of internet user per 100 people, the number of mobile phone users and the number of cars per 1000 people. Unlike before, the birth rate per 1000 people seems to play a role here. Unfortunately, the r-squared statistic looks even worse here, with only explaining 56,81% of the variance. It can be concluded that this model doesn't fit the data, which might be because of the many zero values. Maybe replacing missing values with the 25%-percentile would have been a better option, as the median lead to a too high distortion, mentioned in the beginning.
+
+Nevertheless, I want to inspect the residuals visually.
+
+```{r}
+par(mfcol=c(2,2))
+plot(linreg_cluster3)
+```
+
+The residuals vs. fitted plot indicates a linearity, as the red line is nearly vertical. But as before, the next plot (scale-location) indicates heteroskedasticity and the quantile-quantile plot implies that the residuals are not distributed normally, as they aren't near ne line, except for the middle. Luckily no strong outliers can be detected using the cook's distance in the residuals vs. leverage plot. To achieve better results, resp. a more accurate model and the desired attributes of homoskedasticity and normally distributed residuals, I would recommend to run the regression analysis again, using the significant variables only and transforming the dependent variable (logarithmic or squareroot) beforehand. Changing the replacement of missing values from zero to the 25%-percentile must have been done before doing the clustering so that all missing values are replaced similarly, may leading to different cluster assignments. It could be tried if there would be better clusters, but to only influence the regression analysis of this current cluster it is not a suitable method here.
+
+```{r}
+linreg_cluster4 <- lm(model, cluster_4)
+summary(linreg_cluster4)
+```
+
+The structure of this cluster differs from the others. As seen before, the urban and total population, the internet users per 100 people and the number of mobile phone subscribers have a significant influence on the GDP. Different from the analyses before, the share of people over 65 and between 15 and 64, as well as the life expectancy of men and women, the child mortality and the million passenger-km have an influence on the height of the GDP. It is also good to see that the adjusted R-squared measure has a value above 80% (84,81%), indicating that this is a well fitting model to describe the underlying data.
+
+To see if the other assumptions from the linear regression are fulfilled, too, we look again at the residuals visually.
+
+```{r}
+par(mfcol=c(2,2))
+plot(linreg_cluster4)
+```
+
+The residuals vs. fitted plot indicates linearity, as in the cases before, but not that clearly. And as before the scale-location plot indicates heteroskedasticity. The quantile-quantile plot however looks a bit better in my opinion than in the two cases before. Only a few data points aren't near the line and the rest matches exactly. The residuals vs. leverage plot looks good, too, as no strong outliers are detected and the cook's distance line is almost invisible. To get rid of the indicated heteroskedasticity, I would recommend to perform the regression analysis again with a transformed dependent variable.
+
+# Conclusion
+
+The clusters determined by the k-means clustering algorithm using k = 4 gives appropriate results in my opinion. To achieve even better results it could be performed using the 25%-percentile or any other better fitting percentile as a replacement for missing values than zero. It hasn't been done here, as I tried out some other replacements like the mean and median that weren't suitable and therefore chose to simply replace all missing values with zero.
+
+In the regression part the different replacement would have made a difference for the third cluster, as it contained many missing values beforehand. But then again, this cluster won't exist as it is now. Other than that, a different structure was identified in different clusters leading to the total GDP in US Dollar. Despite the differences that are sometimes bigger, sometimes smaller, there were a few similarities, like the population, that had a significant influence in all clusters. The linear regression is a fitting model here in my opinion, as the visual inspection of residuals indicated linearity in all clusters. The heteroskedasticity implied in some clusters could be changed by transforming the dependent variable.
